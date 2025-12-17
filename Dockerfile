@@ -1,5 +1,5 @@
 # 1. Image de base (Java 17)
-FROM openjdk:17-jdk-slim
+FROM eclipse-temurin:17-jdk-focal
 
 # 2. Dossier de travail dans le conteneur
 WORKDIR /app
