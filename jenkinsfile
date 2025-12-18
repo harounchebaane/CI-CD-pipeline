@@ -1,0 +1,114 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Git') {
+            steps {
+                git branch: 'main',
+                    credentialsId: 'github-token',
+                    url: 'https://github.com/harounchebaane/CI-CD-pipeline.git'
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                // On fait tout en une fois pour éviter de relancer Maven 3 fois
+                sh './mvnw clean verify' 
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withCredentials([string(credentialsId: 'SONAR_TOKEN_ID', variable: 'SONAR_TOKEN')]) {
+                    // Utilisation de simples quotes (') pour la sécurité (pas d'interpolation Groovy)
+                    sh '''
+                        ./mvnw sonar:sonar \
+                        -Dsonar.projectKey=Student-Management-Application \
+                        -Dsonar.host.url=http://localhost:9000 \
+                        -Dsonar.login=$SONAR_TOKEN
+                    '''
+                }
+            }
+        }
+
+        stage('Build & Push Docker Image') {
+            steps {
+                script {
+                    // 1. Build
+                    sh "docker build -t harounchebaane/student-management:latest ."
+                    
+                    // 2. Login et Push
+                    withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                        sh "docker login -u $DOCKER_USER -p $DOCKER_PASS"
+                        sh "docker push harounchebaane/student-management:latest"
+                    }
+                    
+                    // 3. OPTIMISATION : Supprimer l'image locale pour libérer l'espace
+                    sh "docker rmi harounchebaane/student-management:latest"
+                    
+                    // 4. OPTIMISATION : Supprimer les images "orphelines" (layers inutiles)
+                    sh "docker image prune -f"
+                }
+            }
+        }
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    // Application des fichiers YAML
+                    sh 'kubectl apply -f mysql-deployment.yaml'
+                    sh 'kubectl apply -f spring-deployment.yaml'
+                    
+                    // Force la mise à jour de l'image (indispensable avec le tag :latest)
+                    sh 'kubectl rollout restart deployment/spring-app -n devops'
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def discordUrl = "https://discord.com/api/webhooks/1451173013566390282/RZl4WT-_TvRqkbcn9X0Ej8_VUSKNfF5UKI3UE5pfMWbOBb56XOpnoVt5RaCFmG0MEshO"
+                def payload = """
+                {
+                  "content": "✅ **DÉPLOIEMENT RÉUSSI**",
+                  "embeds": [{
+                    "title": "${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                    "color": 3066993,
+                    "description": "L'application a été déployée avec succès sur Kubernetes.",
+                    "fields": [
+                      { "name": "Namespace", "value": "devops", "inline": true },
+                      { "name": "Lien", "value": "[Voir le build](${env.BUILD_URL})", "inline": true }
+                    ]
+                  }]
+                }
+                """
+                // On écrit le JSON dans un fichier pour éviter les erreurs de syntaxe shell
+                writeFile file: 'success.json', text: payload
+                sh "curl -X POST -H 'Content-Type: application/json' -d @success.json ${discordUrl}"
+            }
+            cleanWs()
+        }
+
+        failure {
+            script {
+                def discordUrl = "https://discord.com/api/webhooks/XXXXX/YYYYY"
+                def payload = """
+                {
+                  "content": "❌ **ALERTE : LE PIPELINE A ÉCHOUÉ**",
+                  "embeds": [{
+                    "title": "${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                    "color": 15158332,
+                    "description": "Une erreur est survenue lors de l'exécution.",
+                    "fields": [
+                      { "name": "Logs", "value": "[Consulter la console](${env.BUILD_URL}console)" }
+                    ]
+                  }]
+                }
+                """
+                writeFile file: 'failure.json', text: payload
+                sh "curl -X POST -H 'Content-Type: application/json' -d @failure.json ${discordUrl}"
+            }
+        }
+    }
+}
